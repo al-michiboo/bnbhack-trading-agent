@@ -3,6 +3,8 @@
 > AI trading agent for the **BNB Hack: AI Trading Agent Edition** hackathon
 > (BNB Chain × CoinMarketCap × Trust Wallet — $36K prize pool, 3 weeks).
 
+![Architecture](docs/architecture.png)
+
 Mavis is an autonomous crypto agent that **reads markets, reads narratives, and
 acts on them** — covering both tracks of the hackathon in a single integrated
 system.
