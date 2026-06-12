@@ -18,6 +18,12 @@ from pathlib import Path
 # Make `agent` importable when run as a script
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# Also add the hermes site-packages so we can import `gateway.platforms.weixin`
+# (the WeChat sender lives in the hermes install, not the project venv)
+HERMES_SITE = "/usr/local/lib/python3.11/site-packages"
+if HERMES_SITE not in sys.path:
+    sys.path.insert(0, HERMES_SITE)
+
 # Load /root/.hermes/.env first (canonical WeChat credentials)
 hermes_env = Path("/root/.hermes/.env")
 if hermes_env.exists():
@@ -54,10 +60,17 @@ async def run() -> None:
         tick_seconds=60,
     )
     try:
-        portfolio = await agent.run_once()
+        # Bound the whole tick to 110s — under the cron's 120s script
+        # timeout so the scheduler doesn't kill us mid-WeChat-send.
+        # Last full run on 2026-06-12 took ~95s for 8 symbols.
+        portfolio = await asyncio.wait_for(agent.run_once(), timeout=110.0)
+    except asyncio.TimeoutError:
+        sent = await send_wechat("🐧 Mavis tick TIMED OUT (110s)")
+        print(f"[wechat-on-timeout] sent={sent}")
+        return
     except Exception as e:
         # Always send a report — even on failure — so silence doesn't equal success
-        sent = send_wechat(f"🐧 Mavis tick FAILED\n{type(e).__name__}: {e}")
+        sent = await send_wechat(f"🐧 Mavis tick FAILED\n{type(e).__name__}: {e}")
         print(f"[wechat-on-fail] sent={sent}")
         raise
 
@@ -85,7 +98,7 @@ async def run() -> None:
         f"realized: ${realized:,.2f}   trades: {total_trades}\n"
         f"recent:\n{trades_block}"
     )
-    sent = send_wechat(msg)
+    sent = await send_wechat(msg)
     print(f"[wechat] sent={sent}")
     print(msg)
 
@@ -95,35 +108,39 @@ def send_wechat(msg: str) -> bool:
 
     Canonical pattern: inline send_weixin_direct call (no bridge).
     Token is loaded from WEIXIN_TOKEN env var.
+
+    Returns an awaitable so callers in async context can `await` it.
+    To call from sync context, use `asyncio.run(send_wechat(msg))`.
     """
-    try:
-        from gateway.platforms.weixin import send_weixin_direct
-    except Exception as e:
-        print(f"[warn] wechat import failed: {e}", file=sys.stderr)
-        return False
+    async def _send() -> bool:
+        try:
+            from gateway.platforms.weixin import send_weixin_direct
+        except Exception as e:
+            print(f"[warn] wechat import failed: {e}", file=sys.stderr)
+            return False
 
-    token = os.environ.get("WEIXIN_TOKEN")
-    if not token:
-        print("[warn] WEIXIN_TOKEN not set in env", file=sys.stderr)
-        return False
+        token = os.environ.get("WEIXIN_TOKEN")
+        if not token:
+            print("[warn] WEIXIN_TOKEN not set in env", file=sys.stderr)
+            return False
 
-    try:
-        result = send_weixin_direct(
-            extra={
-                "account_id": "767876f95ef4@im.bot",
-                "base_url": "https://api.im.bot",
-                "cdn_base_url": "https://cdn.im.bot",
-            },
-            token=token,
-            chat_id=WECHAT_CHAT_ID,
-            message=msg,
-        )
-        success = bool(result and result.get("success"))
-        print(f"[wechat] result: {result}")
-        return success
-    except Exception as e:
-        print(f"[warn] wechat send failed: {e}", file=sys.stderr)
-        return False
+        try:
+            # Use env vars for base_url/cdn_base_url/account_id so we don't hardcode
+            extra = {"account_id": os.environ.get("WEIXIN_ACCOUNT_ID", "767876f95ef4@im.bot")}
+            result = await send_weixin_direct(
+                extra=extra,
+                token=token,
+                chat_id=WECHAT_CHAT_ID,
+                message=msg,
+            )
+            success = bool(result and result.get("success"))
+            print(f"[wechat] result: {result}")
+            return success
+        except Exception as e:
+            print(f"[warn] wechat send failed: {e}", file=sys.stderr)
+            return False
+
+    return _send()
 
 
 if __name__ == "__main__":
